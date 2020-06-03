@@ -1,4 +1,5 @@
 import datetime
+import time
 import ipaddress
 import re
 from importlib import import_module
@@ -8,6 +9,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import Resolver404, resolve
+from django.utils.http import http_date
 
 
 def compile_url_exceptions(url_exceptions):
@@ -47,8 +49,9 @@ class LockdownMiddleware(object):
     # pylint: disable=too-many-arguments
     def __init__(self, get_response=None, form=None, until_date=None,
                  after_date=None, logout_key=None, session_key=None,
-                 url_exceptions=None, remote_addr_exceptions=None,
-                 trusted_proxies=None, extra_context=None, **form_kwargs):
+                 url_exceptions=None, view_exceptions=None,
+                 remote_addr_exceptions=None, trusted_proxies=None,
+                 extra_context=None, **form_kwargs):
         """Initialize the middleware, by setting the configuration values."""
         if logout_key is None:
             logout_key = getattr(settings,
@@ -98,9 +101,7 @@ class LockdownMiddleware(object):
         if self.remote_addr_exceptions:
             remote_addr_exceptions = self.remote_addr_exceptions
         else:
-            remote_addr_exceptions = getattr(settings,
-                                             'LOCKDOWN_REMOTE_ADDR_EXCEPTIONS',
-                                             [])
+            remote_addr_exceptions = getattr(settings, 'LOCKDOWN_REMOTE_ADDR_EXCEPTIONS', [])
 
         remote_addr_exceptions = [ipaddress.ip_network(ip)
                                   for ip in remote_addr_exceptions]
@@ -173,9 +174,7 @@ class LockdownMiddleware(object):
             form_class = self.form
         else:
             form_class = get_lockdown_form(
-                getattr(settings,
-                        'LOCKDOWN_FORM',
-                        'lockdown.forms.LockdownForm'))
+                getattr(settings, 'LOCKDOWN_FORM', 'lockdown.forms.LockdownForm'))
         form = form_class(data=form_data, **self.form_kwargs)
 
         authorized = False
@@ -193,9 +192,29 @@ class LockdownMiddleware(object):
             del querystring[self.logout_key]
             return self.redirect(request)
 
+        # If using lockdown cookie, the cookie can provide an entry even if
+        # the session is not valid.
+        use_lockdown_cookie = getattr(settings, 'LOCKDOWN_USE_OWN_COOKIE', False)
+        lockdown_cookie_name = getattr(settings, 'LOCKDOWN_COOKIE_NAME', 'lockdown-session')
+        cookie = request.COOKIES.get(lockdown_cookie_name)
+        if cookie:
+            authorized = True
+
         # Don't lock down if the user is already authorized for previewing.
         if authorized:
-            return None
+            response = self.get_response(request)
+            # If using lockdown cookie, set the cookie
+            if use_lockdown_cookie:
+                max_age = settings.COOKIE_AGE
+                expires_time = time.time() + max_age
+                expires = http_date(expires_time)
+                cookie = {'max_age': max_age,
+                          'expires': expires, 'domain': getattr(settings, 'SESSION_COOKIE_DOMAIN', None),
+                          'path': getattr(settings, 'SESSION_COOKIE_PATH', None),
+                          'secure': getattr(settings, 'SESSION_COOKIE_SECURE', None),
+                          'httponly': getattr(settings, 'SESSION_COOKIE_HTTPONLY', None), }
+                response.set_cookie(key=lockdown_cookie_name, value='thx1138', **cookie)
+            return response
 
         if form.is_valid():
             if hasattr(form, 'generate_token'):
@@ -208,10 +227,8 @@ class LockdownMiddleware(object):
         page_data = {'until_date': until_date, 'after_date': after_date}
         if not hasattr(form, 'show_form') or form.show_form():
             page_data['form'] = form
-
         if self.extra_context:
             page_data.update(self.extra_context)
-
         return render(request, 'lockdown/form.html', page_data)
 
     def redirect(self, request):
