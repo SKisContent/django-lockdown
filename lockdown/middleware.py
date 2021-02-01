@@ -205,7 +205,7 @@ class LockdownMiddleware(object):
             response = self.get_response(request)
             # If using lockdown cookie, set the cookie
             if use_lockdown_cookie:
-                max_age = settings.COOKIE_AGE
+                max_age = getattr(settings, 'COOKIE_AGE', 300)
                 expires_time = time.time() + max_age
                 expires = http_date(expires_time)
                 cookie = {'max_age': max_age,
